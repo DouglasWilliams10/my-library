@@ -19,9 +19,10 @@ Registrar as tecnologias efetivamente utilizadas no MyLibrary. As versões exata
 
 ## Dados e persistência
 
-- PostgreSQL: banco de dados relacional.
-- Prisma ORM: versão instalada no projeto.
-- Migrações Prisma para versionar alterações no esquema.
+- PostgreSQL gerenciado pelo Neon, utilizado desde o ambiente de desenvolvimento.
+- Prisma ORM: versão instalada no projeto, utilizado para acesso ao banco, gerenciamento do schema e migrações.
+- As URLs e credenciais de conexão devem ser fornecidas por variáveis de ambiente, nunca embutidas no código ou nos arquivos de especificação.
+- O arquivo `.env` deve permanecer fora do Git. O `.env.example` deve conter somente nomes de variáveis e exemplos fictícios, sem credenciais reais.
 
 ## Autenticação
 
@@ -55,6 +56,7 @@ A biblioteca escolhida para EPUB e as bibliotecas de leitura devem ser definidas
 - Provedor e configuração de armazenamento de objetos para produção.
 - Frameworks de testes unitários e ponta a ponta.
 - Estratégia de hash de senha compatível com a solução de autenticação escolhida.
+- Nomes das variáveis de ambiente de conexão do Neon e configuração específica de conexão do Prisma.
 
 ## Ferramentas de desenvolvimento
 
