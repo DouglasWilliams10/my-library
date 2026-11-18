@@ -1,6 +1,6 @@
 # SPEC.md
 
-# Feature: Biblioteca pessoal, importação de livros e compartilhamento controlado
+# Funcionalidade: Biblioteca pessoal, importação de livros e compartilhamento controlado
 
 ## Objetivo
 
@@ -16,16 +16,17 @@ Esta especificação descreve o escopo inicial. Funcionalidades futuras devem se
 - Biblioteca privada por usuário.
 - Cadastro manual de metadados de livros.
 - Upload de PDF, EPUB e TXT.
-- Um único arquivo principal por livro no MVP.
+- Histórico de versões de arquivos: cada livro pode ter várias versões históricas, mas somente uma versão atual.
 - Validação de formato, conteúdo e tamanho; arquivos TXT devem usar codificação UTF-8.
-- Limite de upload configurável, com padrão inicial de 50 MB.
+- Limite de upload de 50 MiB (52.428.800 bytes), configurável por variável de ambiente ou configuração centralizada, validado no servidor e sem duplicação do valor pelo código.
 - Listagem, pesquisa e filtro da biblioteca.
 - Leitura integrada de PDF, EPUB e TXT, conforme suporte da biblioteca escolhida.
 - Download autorizado de arquivos.
 - Compartilhamento privado com usuário cadastrado.
 - Permissões separadas de leitura e download.
 - Revogação de compartilhamento.
-- Exclusão lógica de livros, revogando seus compartilhamentos ativos.
+- Substituição do arquivo atual pelo proprietário, criando uma nova versão, preservando os metadados das versões, removendo fisicamente a versão anterior e reiniciando o progresso de todos os usuários sem alterar os metadados do livro ou as permissões de compartilhamento.
+- Exclusão lógica de livros, revogando seus compartilhamentos ativos, removendo fisicamente os arquivos de todas as versões e preservando metadados do livro, das versões e registros de progresso no banco.
 - Registro do progresso de leitura por usuário e livro, com posição adequada ao formato.
 - Interface responsiva com identidade clássica e aconchegante.
 
@@ -61,7 +62,8 @@ Esta especificação descreve o escopo inicial. Funcionalidades futuras devem se
 
 ### Destinatário do compartilhamento
 
-- Visualizar o livro compartilhado se tiver permissão de leitura.
+- Visualizar os detalhes do livro se tiver permissão de leitura.
+- Se tiver `canDownload = true` e `canRead = false`, visualizar somente título e capa na biblioteca de compartilhamentos recebidos; não acessar os demais metadados nem o leitor.
 - Baixar o arquivo somente se tiver permissão de download.
 - Não pode editar, excluir ou compartilhar novamente o livro original.
 
@@ -91,19 +93,33 @@ Os nomes abaixo são conceituais; os nomes finais devem ser consistentes no cód
 - `createdAt`: data de cadastro.
 - `updatedAt`: data de atualização.
 - A exclusão é lógica; o campo ou mecanismo que a representa será definido no schema.
+- Ao iniciar a exclusão lógica, o livro e todas as suas versões ficam imediatamente inacessíveis. A exclusão só é concluída após a remoção física confirmada de todas as versões; livros excluídos não podem ser acessados, lidos ou baixados por nenhum usuário.
+- A exclusão lógica preserva os metadados do livro e os registros de progresso. O estado pendente ou concluído da exclusão deve poder ser consultado pelo proprietário sem reabrir o acesso ao livro ou às versões.
+- O estado do processo de exclusão deve ser mantido em um registro persistente, independentemente da existência dos arquivos físicos ou da limpeza de `storageKey`.
 
 ### BookFile
 
 - `id`: identificador único.
 - `bookId`: livro relacionado.
 - `originalFileName`: nome original.
-- `storageKey`: referência interna ao arquivo.
+- `storageKey`: referência interna ao arquivo, nula após confirmação da remoção física.
 - `format`: PDF, EPUB ou TXT.
 - `mimeType`: tipo de conteúdo validado.
 - `sizeBytes`: tamanho em bytes.
 - `checksum`: hash para verificação de integridade, quando implementado.
 - `createdAt`: data de importação.
-- Cada livro pode ter no máximo um `BookFile` no MVP.
+- `isCurrent`: indica se esta versão é a atual; cada livro pode ter no máximo uma versão atual.
+- `deletedAt`: data da remoção física confirmada, nula até essa confirmação.
+- `deletionPending`: indica que a remoção física falhou e precisa ser recuperada; é um atributo conceitual, e o mecanismo concreto de persistência será definido na implementação.
+- Cada importação inicial e cada substituição efetivada cria um novo registro `BookFile`; um livro pode ter várias versões, mas no máximo uma pode estar atual.
+- Os registros históricos de `BookFile` preservam metadados para auditoria e rastreabilidade, mas não preservam o conteúdo binário das versões removidas nem permitem recuperá-las pela aplicação.
+- A aplicação e o banco de dados devem proteger a invariável de no máximo uma versão atual por livro, inclusive contra operações concorrentes. Restrições de integridade e transações devem ser avaliadas para a solução PostgreSQL/Prisma; esta especificação não determina uma implementação específica.
+- O novo arquivo deve ser completamente validado antes de efetivar a substituição. Após a validação, a nova versão torna-se atual e a anterior histórica e imediatamente inacessível. A substituição não altera metadados do livro nem permissões de compartilhamento.
+- A efetivação da nova versão não depende da remoção física da versão anterior. Se essa remoção falhar, a substituição não é desfeita: a nova versão permanece atual e funcional, e a anterior permanece histórica, inacessível e com remoção pendente registrada para recuperação.
+- Após a confirmação da remoção física, o registro histórico da versão é preservado, `storageKey` é limpo e `deletedAt` é preenchido. Enquanto a remoção estiver pendente, o registro e seus metadados são preservados, `storageKey` não é limpo e `deletedAt` não indica uma remoção concluída.
+- Após a substituição, o progresso de todos os usuários do livro é reiniciado. Versões históricas nunca podem ser lidas ou baixadas pela aplicação.
+- Ao iniciar a exclusão lógica do livro, o livro e todas as versões ficam imediatamente inacessíveis e seus compartilhamentos ativos são revogados. A exclusão só é concluída quando todos os arquivos físicos forem removidos com confirmação.
+- Na exclusão lógica, os registros e metadados de todas as versões são preservados. Cada remoção confirmada limpa `storageKey` e preenche `deletedAt`; falhas mantêm as versões afetadas inacessíveis e pendentes de recuperação. A recuperação pode repetir a remoção sem restaurar o acesso.
 
 ### BookShare
 
@@ -127,7 +143,7 @@ Os nomes abaixo são conceituais; os nomes finais devem ser consistentes no cód
 
 Restrições de integridade, índices e relacionamentos devem ser definidos no schema do Prisma. O progresso deve ser único por combinação de usuário e livro.
 
-A representação de `position` deve respeitar as características de cada formato e da biblioteca de leitura escolhida; a representação concreta por formato ainda precisa ser definida. A retenção do progresso após exclusão lógica de um livro também precisa ser decidida.
+A representação de `position` deve respeitar as características de cada formato e da biblioteca de leitura escolhida; a representação concreta por formato ainda precisa ser definida. Na substituição do arquivo, o progresso de todos os usuários do livro deve voltar ao início. Na exclusão lógica, os registros de progresso permanecem preservados no banco.
 
 ## Contratos de API propostos
 
@@ -140,19 +156,27 @@ Os caminhos são propostas iniciais e podem ser ajustados antes da implementaç�
 
 ### Livros
 
-- `GET /api/books`: listar livros próprios e compartilhados com o usuário autenticado, identificando a origem e as permissões; a visibilidade dos compartilhamentos com download sem leitura ainda precisa ser definida.
+- `GET /api/books`: listar livros próprios e compartilhados com o usuário autenticado, identificando a origem e as permissões. Para compartilhamento com `canDownload = true` e `canRead = false`, incluir o item na biblioteca recebida e disponibilizar somente título e capa.
 - `POST /api/books`: cadastrar metadados de um livro.
-- `GET /api/books/{id}`: consultar livro autorizado.
+- `GET /api/books/{id}`: consultar livro autorizado. Para compartilhamento com `canDownload = true` e `canRead = false`, retornar somente título e capa.
 - `PATCH /api/books/{id}`: editar metadados, somente pelo proprietário.
-- `DELETE /api/books/{id}`: excluir logicamente o livro, somente pelo proprietário, revogando seus compartilhamentos ativos e impedindo acessos subsequentes.
+- `DELETE /api/books/{id}`: iniciar a exclusão lógica, somente pelo proprietário. No início, revogar os compartilhamentos ativos e bloquear imediatamente o acesso ao livro e a todas as versões; preservar os metadados do livro e os registros de progresso.
+  - Retornar `204 No Content`, sem corpo de resposta, somente quando todos os arquivos físicos das versões tiverem sido removidos com confirmação e o registro persistente do processo de exclusão também estiver marcado como `completed`.
+  - Se a remoção de qualquer versão falhar, retornar `202 Accepted` com corpo contendo `deletionStatus: "pending"` e `statusUrl: "/api/books/{id}/deletion-status"`. A resposta deve permitir ao cliente consultar posteriormente o estado. Não apresentar a exclusão como concluída; manter livro e versões inacessíveis e registrar as remoções pendentes para recuperação.
+- `GET /api/books/{id}/deletion-status`: consultar, somente pelo proprietário, o registro persistente do processo de exclusão, sem disponibilizar metadados do livro ou acesso a arquivos. A consulta independe da existência dos arquivos físicos e de `storageKey` estar preenchido ou limpo. Retornar `200 OK` com `deletionStatus: "pending"` enquanto houver remoção não confirmada e `deletionStatus: "completed"` somente após a remoção física confirmada de todas as versões. Novas tentativas de remoção não podem restaurar o acesso.
 
 ### Arquivos
 
-- `POST /api/books/{id}/file`: importar arquivo para um livro próprio.
+- `POST /api/books/{id}/file`: importar uma primeira versão para um livro próprio, criando um registro `BookFile` atual.
+- `PUT /api/books/{id}/file`: substituir a versão atual, somente pelo proprietário. Validar completamente o novo arquivo antes de efetivar a operação; após essa validação, criar o novo registro atual e marcar a versão anterior como histórica e imediatamente inacessível; preservar os metadados do livro e os compartilhamentos; reiniciar o progresso de todos os usuários; tentar remover fisicamente o arquivo antigo.
+  - Retornar `200 OK` com `replacementStatus: "effective"` quando a substituição estiver efetivada. Informar `previousVersionCleanup: "completed"` quando a remoção física da versão anterior tiver sido confirmada ou `"pending"` quando a remoção falhar e precisar de recuperação.
+  - A limpeza física pendente não desfaz nem invalida a substituição: a nova versão permanece atual, acessível conforme as permissões e funcional. A versão anterior permanece histórica e inacessível; não registrar sua remoção como concluída antes da confirmação.
 - `GET /api/books/{id}/file`: obter o arquivo para leitura, se houver permissão de leitura.
 - `GET /api/books/{id}/download`: baixar o arquivo, se houver permissão de download.
-- As permissões de leitura e download são independentes; a permissão de download sem leitura autoriza o download, mas não a abertura no leitor. A visibilidade de metadados e do item nessa situação ainda precisa ser definida.
+- Os contratos de leitura e download operam somente sobre a versão atual; nenhuma versão histórica pode ser acessada pela aplicação.
+- As permissões de leitura e download são independentes. Com `canDownload = true` e `canRead = false`, o destinatário pode baixar o arquivo, não pode abrir o leitor e só pode consultar título e capa. O servidor deve validar autorização e limitar os dados retornados em todas as operações.
 - A implementação deve validar autorização no servidor em todas essas operações.
+- O limite máximo do upload é configurável por variável de ambiente ou configuração centralizada; o padrão é 50 MiB (52.428.800 bytes). A validação é obrigatória no servidor e o limite não deve ser duplicado pelo código.
 
 ### Compartilhamento
 
@@ -165,12 +189,13 @@ Os caminhos são propostas iniciais e podem ser ajustados antes da implementaç�
 
 - `GET /api/books/{id}/progress`: consultar progresso do usuário autenticado.
 - `PUT /api/books/{id}/progress`: salvar progresso do usuário autenticado.
+- O acesso ao progresso de um livro compartilhado exige permissão de leitura; permissão de download, por si só, não autoriza consultar ou alterar progresso.
 
 ## Exemplos de respostas e erros
 
 - `200 OK`: consulta ou alteração concluída.
 - `201 Created`: usuário, livro ou compartilhamento criado.
-- `204 No Content`: remoção ou revogação concluída sem corpo de resposta.
+- `204 No Content`: exclusão concluída ou revogação concluída, sem corpo de resposta. Para exclusão de livro, só retornar após a confirmação da remoção física de todas as versões e após marcar como `completed` o registro persistente do processo de exclusão.
 - `400 Bad Request`: dados inválidos.
 - `401 Unauthorized`: usuário não autenticado.
 - `403 Forbidden`: usuário autenticado sem permissão.
@@ -179,6 +204,9 @@ Os caminhos são propostas iniciais e podem ser ajustados antes da implementaç�
 - `413 Payload Too Large`: arquivo excede o limite.
 - `415 Unsupported Media Type`: formato não suportado.
 - `422 Unprocessable Entity`: arquivo inválido ou corrompido, quando aplicável.
+- `202 Accepted`: exclusão lógica iniciada, mas remoção física de uma ou mais versões ainda pendente; o corpo deve conter `deletionStatus: "pending"` e `statusUrl` para consultar o estado posteriormente.
+- Uma substituição efetivada retorna `200 OK` com `replacementStatus: "effective"` mesmo que a remoção física da versão anterior esteja pendente, identificando essa condição em `previousVersionCleanup`. A nova versão continua funcionando.
+- Falha de remoção física não pode ser apresentada como conclusão de exclusão; o estado e a recuperação devem ser identificados e consultáveis sem reabilitar acesso. A limpeza de cada versão só é concluída após confirmação física.
 
 As respostas não devem revelar a existência de recursos privados de outros usuários.
 
@@ -218,12 +246,15 @@ As respostas não devem revelar a existência de recursos privados de outros usu
 
 ### Biblioteca e arquivos
 
-- [ ] Criar modelos Book e BookFile.
+- [ ] Criar modelos Book e BookFile com histórico de versões e garantir, também no banco de dados, no máximo uma versão atual por livro, inclusive em operações concorrentes; avaliar as limitações do Prisma antes de escolher a implementação.
 - [ ] Implementar cadastro manual de livros.
 - [ ] Implementar listagem, pesquisa e filtros.
 - [ ] Implementar upload de PDF, EPUB e TXT.
-- [ ] Validar extensão, conteúdo e tamanho no servidor; exigir UTF-8 para TXT e um único arquivo principal por livro.
-- [ ] Aplicar limite de upload configurável, com padrão inicial de 50 MB.
+- [ ] Validar extensão, conteúdo e tamanho no servidor; exigir UTF-8 para TXT e garantir somente uma versão atual por livro.
+- [ ] Aplicar limite de upload configurável por variável de ambiente ou configuração centralizada, padrão de 50 MiB (52.428.800 bytes), validado no servidor e sem valor duplicado no código.
+- [ ] Permitir que o proprietário substitua o arquivo atual somente após validar completamente o novo arquivo; efetivar a nova versão como atual e a anterior como histórica e imediatamente inacessível; preservar metadados e compartilhamentos e reiniciar o progresso de todos os usuários.
+- [ ] Fazer com que a falha na remoção física da versão anterior deixe a substituição efetivada, mantenha a nova versão funcional e registre a limpeza pendente para recuperação.
+- [ ] Registrar e recuperar falhas de remoção física de versões sem permitir leitura ou download da versão pendente; limpar `storageKey` e preencher `deletedAt` somente após confirmação.
 - [ ] Configurar armazenamento local para desenvolvimento.
 - [ ] Implementar leitura dos formatos suportados.
 - [ ] Implementar download autorizado.
@@ -235,7 +266,9 @@ As respostas não devem revelar a existência de recursos privados de outros usu
 - [ ] Implementar concessão de acesso por e-mail cadastrado.
 - [ ] Implementar permissões independentes de leitura e download, incluindo download sem leitura.
 - [ ] Implementar revogação de acesso.
-- [ ] Implementar exclusão lógica de livros e revogação de seus compartilhamentos ativos.
+- [ ] Implementar exclusão lógica, revogação dos compartilhamentos ativos e bloqueio imediato do livro e de todas as versões; concluir a exclusão somente após remoção física confirmada de todas as versões, preservando metadados e progresso.
+- [ ] Manter um registro persistente do processo de exclusão, independente da existência física dos arquivos ou do valor de `storageKey`.
+- [ ] Expor o estado pendente da exclusão ao cliente com informação suficiente para consulta posterior; permitir novas tentativas de remoção sem restaurar o acesso.
 - [ ] Criar modelo ReadingProgress.
 - [ ] Salvar e recuperar progresso por usuário e livro.
 - [ ] Criar testes para permissões e progresso.
@@ -253,27 +286,35 @@ As respostas não devem revelar a existência de recursos privados de outros usu
 1. Um visitante consegue criar uma conta e entrar na aplicação usando e-mail e senha; login pelo Google não é oferecido.
 2. Um usuário não consegue consultar a biblioteca privada de outro usuário.
 3. Um usuário consegue cadastrar um livro sem arquivo digital.
-4. Um usuário consegue importar um PDF, EPUB ou TXT válido dentro do limite configurado; TXT deve ser UTF-8 e cada livro aceita apenas um arquivo principal.
-5. Um arquivo inválido, não suportado ou acima do limite é recusado sem deixar cadastro incompleto.
+4. Um usuário consegue importar um PDF, EPUB ou TXT válido de até o limite configurado no servidor (padrão de 50 MiB, 52.428.800 bytes), com TXT em UTF-8; a importação cria uma versão atual e um livro nunca tem mais de uma versão atual.
+5. Um arquivo inválido, não suportado ou maior que o limite configurado é recusado no servidor sem deixar cadastro incompleto.
 6. Um livro com arquivo compatível pode ser aberto no leitor.
 7. O proprietário consegue baixar seu próprio arquivo.
 8. O proprietário consegue compartilhar um livro com um usuário cadastrado, concedendo leitura e download de forma independente.
 9. Um destinatário sem permissão de download não consegue baixar o arquivo, mesmo tentando acessar o endpoint diretamente.
-10. Um destinatário com permissão de download, mas sem leitura, consegue baixar o arquivo, mas não abri-lo no leitor.
+10. Um destinatário com `canDownload = true` e `canRead = false` vê o livro na biblioteca recebida, pode consultar apenas título e capa, consegue baixar o arquivo e não consegue abrir o leitor; acessos diretos também respeitam essas restrições no servidor.
 11. O proprietário consegue revogar o compartilhamento e o destinatário perde o acesso pela aplicação.
-12. Ao excluir logicamente um livro, seus compartilhamentos ativos são revogados e antigos destinatários perdem o acesso pela aplicação.
-13. O progresso de leitura de um usuário não altera o progresso de outro usuário, e a posição respeita as características do formato.
-14. A aplicação funciona em telas de desktop e dispositivos móveis.
+12. O proprietário consegue substituir o arquivo atual após validação completa; é criado novo registro atual e a versão anterior torna-se histórica e imediatamente inacessível; metadados e permissões permanecem iguais e o progresso de todos os usuários reinicia. Se a validação falhar, a versão atual e o progresso permanecem inalterados.
+13. Uma versão histórica nunca pode ser lida ou baixada pela aplicação, inclusive enquanto sua remoção física estiver pendente.
+14. Após a remoção física confirmada de uma versão, seu registro e metadados históricos permanecem, `storageKey` é limpo e `deletedAt` é registrado.
+15. Se a remoção física da versão anterior falhar durante a substituição, a API ainda informa a substituição como efetivada, a nova versão permanece atual e funcional, e a antiga fica histórica e inacessível com remoção pendente registrada.
+16. A restrição de no máximo uma versão atual por livro é protegida também no banco de dados contra inconsistências e operações concorrentes.
+17. Ao iniciar a exclusão lógica, o livro e todas as versões ficam imediatamente inacessíveis e os compartilhamentos ativos são revogados; metadados do livro, metadados das versões e registros de progresso permanecem no banco.
+18. Os registros históricos de `BookFile` preservam os metadados para auditoria e rastreabilidade, mas não armazenam o conteúdo binário das versões removidas nem permitem recuperá-las pela aplicação.
+19. `DELETE /api/books/{id}` retorna `204 No Content`, sem corpo, somente após a remoção física confirmada de todas as versões e após o registro persistente do processo de exclusão estar marcado como `completed`.
+20. Se qualquer remoção estiver pendente, `DELETE /api/books/{id}` retorna `202 Accepted` com `deletionStatus: "pending"` e `statusUrl`; o cliente consegue consultar o estado posteriormente.
+21. `GET /api/books/{id}/deletion-status` consulta o registro persistente do processo de exclusão mesmo quando os arquivos físicos já não existem ou `storageKey` já foi limpo; informa `pending` até todas as remoções serem confirmadas e `completed` depois disso.
+22. O estado `pending` continua consultável após reiniciar a aplicação, comprovando que o processo de exclusão não depende apenas da memória do processo.
+23. Novas tentativas de remoção durante a recuperação não restauram o acesso ao livro ou a qualquer versão; após a confirmação de cada remoção, `storageKey` é limpo e `deletedAt` é registrado.
+24. O progresso de leitura de um usuário não altera o progresso de outro usuário, e a posição respeita as características do formato.
+25. A aplicação funciona em telas de desktop e dispositivos móveis.
 
 ## Decisões ainda pendentes
 
 - Campos obrigatórios adicionais no cadastro, além de e-mail e senha.
 - Biblioteca de leitura EPUB e representação concreta da posição de progresso para cada formato.
-- Visibilidade de metadados e do item na interface para destinatários com download, mas sem leitura.
-- Se será permitido substituir o arquivo principal de um livro e, em caso afirmativo, o efeito sobre o progresso de leitura existente.
-- Política de remoção física e retenção do arquivo após exclusão lógica.
-- Retenção ou remoção do progresso de leitura após exclusão lógica.
-- Unidade exata usada para configurar e aplicar o limite de 50 MB.
+- Mecanismo operacional de recuperação e nova tentativa quando a remoção física de uma versão falha.
+- Detalhes de implementação para proteger a unicidade da versão atual no banco com Prisma/PostgreSQL, após avaliação das limitações do Prisma.
 - Provedor e configuração de armazenamento de objetos para produção.
 - Versões efetivas das dependências e frameworks de teste, conforme a stack instalada e as decisões de configuração.
 

@@ -21,6 +21,7 @@ Registrar as tecnologias efetivamente utilizadas no MyLibrary. As versões exata
 
 - PostgreSQL gerenciado pelo Neon, utilizado desde o ambiente de desenvolvimento.
 - Prisma ORM: versão instalada no projeto, utilizado para acesso ao banco, gerenciamento do schema e migrações.
+- A integridade dos dados, incluindo o limite de no máximo uma versão atual por livro diante de operações concorrentes, deve ser protegida também no banco de dados. A estratégia concreta deve ser definida após avaliar as capacidades e limitações do Prisma com PostgreSQL; não presumir uma solução antes dessa avaliação.
 - As URLs e credenciais de conexão devem ser fornecidas por variáveis de ambiente, nunca embutidas no código ou nos arquivos de especificação.
 - O arquivo `.env` deve permanecer fora do Git. O `.env.example` deve conter somente nomes de variáveis e exemplos fictícios, sem credenciais reais.
 
@@ -36,8 +37,8 @@ Registrar as tecnologias efetivamente utilizadas no MyLibrary. As versões exata
 - PDF: visualizador compatível com navegador.
 - EPUB: biblioteca de leitura EPUB compatível com React.
 - TXT: leitura com codificação UTF-8.
-- Cada livro terá apenas um arquivo principal no MVP.
-- O limite de upload será configurável, com valor padrão inicial de 50 MB.
+- Cada livro poderá ter várias versões históricas de arquivo, mas no máximo uma versão atual; a aplicação só permitirá ler ou baixar a versão atual.
+- O limite de upload será configurável centralizadamente, com valor padrão de 50 MiB (52.428.800 bytes); a validação será feita no servidor e o valor não deve ser duplicado em diferentes pontos do código.
 - Armazenamento: adaptador local durante o desenvolvimento, por trás de uma abstração que permita migração futura para armazenamento de objetos em produção. O provedor de produção ainda não está definido.
 
 A biblioteca escolhida para EPUB e as bibliotecas de leitura devem ser definidas e registradas com suas versões reais durante a implementação. Não assumir provedor de armazenamento em produção antes de sua definição.
