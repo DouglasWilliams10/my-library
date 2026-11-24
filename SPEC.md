@@ -97,6 +97,19 @@ Os nomes abaixo são conceituais; os nomes finais devem ser consistentes no cód
 - A exclusão lógica preserva os metadados do livro e os registros de progresso. O estado pendente ou concluído da exclusão deve poder ser consultado pelo proprietário sem reabrir o acesso ao livro ou às versões.
 - O estado do processo de exclusão deve ser mantido em um registro persistente, independentemente da existência dos arquivos físicos ou da limpeza de `storageKey`.
 
+### BookDeletion
+
+- Entidade conceitual que registra persistentemente o processo de exclusão lógica de um livro.
+- `id`: identificador único.
+- `bookId`: livro relacionado.
+- `status`: estado do processo; somente `pending` ou `completed` no MVP.
+- `startedAt`: data de início da exclusão lógica.
+- `completedAt`: data em que todas as remoções físicas aplicáveis foram confirmadas e o processo passou a `completed`.
+- Um livro pode possuir somente um processo ativo de exclusão. Reprocessar uma exclusão já iniciada não cria um novo processo nem reabre o livro.
+- `pending` significa que a exclusão lógica já foi efetivada, o livro e suas versões permanecem inacessíveis e uma ou mais tarefas físicas ainda não foram confirmadas.
+- `completed` significa que todas as tarefas físicas aplicáveis foram concluídas e o processo de exclusão pode ser considerado finalizado.
+- Falhas da remoção física não alteram o status do livro ou de `BookDeletion` para um estado de sucesso. Elas permanecem registradas em `FileRemovalTask`.
+
 ### BookFile
 
 - `id`: identificador único.
@@ -110,7 +123,7 @@ Os nomes abaixo são conceituais; os nomes finais devem ser consistentes no cód
 - `createdAt`: data de importação.
 - `isCurrent`: indica se esta versão é a atual; cada livro pode ter no máximo uma versão atual.
 - `deletedAt`: data da remoção física confirmada, nula até essa confirmação.
-- `deletionPending`: indica que a remoção física falhou e precisa ser recuperada; é um atributo conceitual, e o mecanismo concreto de persistência será definido na implementação.
+- `deletionPending`: visão conceitual derivada da existência de uma tarefa `FileRemovalTask` pendente, com falha ou em execução; não substitui nem duplica o registro persistente da tarefa.
 - Cada importação inicial e cada substituição efetivada cria um novo registro `BookFile`; um livro pode ter várias versões, mas no máximo uma pode estar atual.
 - Os registros históricos de `BookFile` preservam metadados para auditoria e rastreabilidade, mas não preservam o conteúdo binário das versões removidas nem permitem recuperá-las pela aplicação.
 - A aplicação e o banco de dados devem proteger a invariável de no máximo uma versão atual por livro, inclusive contra operações concorrentes. Restrições de integridade e transações devem ser avaliadas para a solução PostgreSQL/Prisma; esta especificação não determina uma implementação específica.
@@ -120,6 +133,43 @@ Os nomes abaixo são conceituais; os nomes finais devem ser consistentes no cód
 - Após a substituição, o progresso de todos os usuários do livro é reiniciado. Versões históricas nunca podem ser lidas ou baixadas pela aplicação.
 - Ao iniciar a exclusão lógica do livro, o livro e todas as versões ficam imediatamente inacessíveis e seus compartilhamentos ativos são revogados. A exclusão só é concluída quando todos os arquivos físicos forem removidos com confirmação.
 - Na exclusão lógica, os registros e metadados de todas as versões são preservados. Cada remoção confirmada limpa `storageKey` e preenche `deletedAt`; falhas mantêm as versões afetadas inacessíveis e pendentes de recuperação. A recuperação pode repetir a remoção sem restaurar o acesso.
+
+### FileRemovalTask
+
+- Entidade conceitual que registra uma tentativa persistente de remover fisicamente um arquivo armazenado localmente pelo MyLibrary.
+- `id`: identificador único.
+- `targetType`: tipo do arquivo afetado, como `book_file` ou `local_cover`.
+- `targetId`: identificador do registro lógico afetado, por exemplo o `BookFile` ou a capa de um `Book`.
+- `storageKey`: referência local persistida até a confirmação da remoção física.
+- `reason`: motivo da tarefa, como `replacement` ou `book_deletion`.
+- `status`: estado da tarefa; estados claros no MVP:
+  - `pending`: aguarda uma tentativa.
+  - `in_progress`: possui uma tentativa em execução pela aplicação.
+  - `failed`: uma tentativa terminou com falha e a tarefa pode ser tentada novamente.
+  - `completed`: o armazenamento confirmou que o arquivo foi removido ou que já não existia no destino.
+- `attemptCount`: número de tentativas realizadas.
+- `lastAttemptAt`: data da última tentativa.
+- `lastError`: informação técnica mínima para diagnóstico, sem caminhos internos desnecessários ou conteúdo do arquivo.
+- `completedAt`: data da conclusão confirmada.
+- `createdAt` e `updatedAt`: datas de criação e atualização da tarefa.
+- Uma tarefa representa uma única referência de armazenamento local e deve ser idempotente: repetir a remoção do mesmo alvo não deve causar dano ou alterar a efetivação lógica já realizada.
+- Capas externas referenciadas por URL não são alvo de `FileRemovalTask`; o MyLibrary não solicita ou realiza remoção no servidor externo.
+- A capa local de um livro também entra no mecanismo quando sua capa anterior é substituída ou quando o livro é excluído.
+- Tarefas encerradas como `completed` são históricas e não devem ser reexecutadas automaticamente.
+
+## Persistência e recuperação de remoções
+
+- Criar `BookDeletion` e `FileRemovalTask` em persistência são pré-requisitos para considerar efetivada uma substituição ou exclusão que envolva remoção física.
+- O estado lógico deve ser confirmado no banco antes de tentar remover arquivos. A tentativa física não pode desfazer ou atrasar a efetivação lógica já aprovada.
+- Ao iniciar ou reiniciar a aplicação, o processo de recuperação deve localizar tarefas persistidas em `pending`, `failed` ou em `in_progress` e permitir novas tentativas.
+- Uma tarefa encontrada como `in_progress` após reinicialização pode ser retomada, pois reiniciar a aplicação não prova que a remoção falhou ou teve sucesso.
+- Novas tentativas devem ocorrer pelo menos no processo de recuperação iniciado pela aplicação. O MVP não exige uma agenda externa ou uma ferramenta específica de fila.
+- Uma tentativa começa alterando `status` para `in_progress`, executa a remoção por meio da abstração de armazenamento e termina em `completed` após confirmação ou em `failed` após falha.
+- A ausência do arquivo no armazenamento durante uma operação idempotente é considerada conclusão da remoção, pois o resultado esperado já foi alcançado.
+- Após `completed`, a referência de armazenamento da entidade afetada deve ser limpa e `deletedAt` deve ser preenchido no `BookFile`; em uma capa local removida, a referência local pode ser limpa apenas no contexto já definido como histórico ou excluído.
+- `storageKey` não pode ser limpo por uma falha nem por uma simples reinicialização.
+- A recuperação não pode tornar o livro excluído acessível, tornar uma versão substituída atual novamente ou reativar compartilhamentos.
+- Nenhuma tarefa depende apenas de memória do processo. Depois de reiniciar a aplicação, o estado consultável e as pendências persistidas continuam disponíveis.
 
 ### BookShare
 
@@ -164,6 +214,8 @@ Os caminhos são propostas iniciais e podem ser ajustados antes da implementaç�
   - Retornar `204 No Content`, sem corpo de resposta, somente quando todos os arquivos físicos das versões tiverem sido removidos com confirmação e o registro persistente do processo de exclusão também estiver marcado como `completed`.
   - Se a remoção de qualquer versão falhar, retornar `202 Accepted` com corpo contendo `deletionStatus: "pending"` e `statusUrl: "/api/books/{id}/deletion-status"`. A resposta deve permitir ao cliente consultar posteriormente o estado. Não apresentar a exclusão como concluída; manter livro e versões inacessíveis e registrar as remoções pendentes para recuperação.
 - `GET /api/books/{id}/deletion-status`: consultar, somente pelo proprietário, o registro persistente do processo de exclusão, sem disponibilizar metadados do livro ou acesso a arquivos. A consulta independe da existência dos arquivos físicos e de `storageKey` estar preenchido ou limpo. Retornar `200 OK` com `deletionStatus: "pending"` enquanto houver remoção não confirmada e `deletionStatus: "completed"` somente após a remoção física confirmada de todas as versões. Novas tentativas de remoção não podem restaurar o acesso.
+
+O estado persistido não precisa expor tarefas internas individuais por um contrato obrigatório do MVP. Se o contrato de diagnóstico for ampliado, ele deve continuar protegido pelo proprietário e não deve revelar caminhos internos, referências privadas ou dados de usuários.
 
 ### Arquivos
 
@@ -305,15 +357,21 @@ As respostas não devem revelar a existência de recursos privados de outros usu
 20. Se qualquer remoção estiver pendente, `DELETE /api/books/{id}` retorna `202 Accepted` com `deletionStatus: "pending"` e `statusUrl`; o cliente consegue consultar o estado posteriormente.
 21. `GET /api/books/{id}/deletion-status` consulta o registro persistente do processo de exclusão mesmo quando os arquivos físicos já não existem ou `storageKey` já foi limpo; informa `pending` até todas as remoções serem confirmadas e `completed` depois disso.
 22. O estado `pending` continua consultável após reiniciar a aplicação, comprovando que o processo de exclusão não depende apenas da memória do processo.
-23. Novas tentativas de remoção durante a recuperação não restauram o acesso ao livro ou a qualquer versão; após a confirmação de cada remoção, `storageKey` é limpo e `deletedAt` é registrado.
-24. O progresso de leitura de um usuário não altera o progresso de outro usuário, e a posição respeita as características do formato.
-25. A aplicação funciona em telas de desktop e dispositivos móveis.
+23. `FileRemovalTask` continua persistida em `pending`, `failed` ou `in_progress` após reiniciar a aplicação e permite que o processo de recuperação reexecute a remoção sem reabrir o acesso.
+24. Quando uma tentativa confirma sucesso, `FileRemovalTask` passa para `completed`, a referência local é limpa e `deletedAt` é preenchido no `BookFile` afetado.
+25. Quando uma tentativa falha, `FileRemovalTask` passa para `failed` e permite novas tentativas; `storageKey` e `deletedAt` permanecem consistentes com uma remoção ainda não confirmada.
+26. A substituição efetiva cria ou mantém uma tarefa persistente para a versão anterior se a remoção física falhar; a nova versão continua atual e funcional.
+27. Na exclusão lógica, uma tarefa persistente é criada ou mantida para cada arquivo local aplicável de todas as versões e para a capa local do livro, quando houver.
+28. Capas externas por URL não geram tarefas de remoção física e não são apagadas no servidor externo.
+29. A recuperação considera uma ausência já confirmada no armazenamento como remoção concluída e não exige que o arquivo exista para uma segunda tentativa.
+30. Novas tentativas de remoção durante a recuperação não restauram o acesso ao livro ou a qualquer versão; após a confirmação de cada remoção, `storageKey` é limpo e `deletedAt` é registrado.
+31. O progresso de leitura de um usuário não altera o progresso de outro usuário, e a posição respeita as características do formato.
+32. A aplicação funciona em telas de desktop e dispositivos móveis.
 
 ## Decisões ainda pendentes
 
 - Campos obrigatórios adicionais no cadastro, além de e-mail e senha.
 - Biblioteca de leitura EPUB e representação concreta da posição de progresso para cada formato.
-- Mecanismo operacional de recuperação e nova tentativa quando a remoção física de uma versão falha.
 - Detalhes de implementação para proteger a unicidade da versão atual no banco com Prisma/PostgreSQL, após avaliação das limitações do Prisma.
 - Provedor e configuração de armazenamento de objetos para produção.
 - Versões efetivas das dependências e frameworks de teste, conforme a stack instalada e as decisões de configuração.

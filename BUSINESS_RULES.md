@@ -73,7 +73,39 @@
 4. O sistema deve registrar informações mínimas necessárias para diagnosticar falhas de upload e operações relevantes, sem registrar o conteúdo dos livros.
 5. A aplicação deve respeitar direitos autorais: o usuário é responsável por possuir autorização para armazenar e compartilhar os arquivos adicionados.
 
-## 7. Resultado esperado
+## 7. Exclusão persistente e remoção física
+
+1. A exclusão lógica de um livro deve ser registrada em uma entidade persistente `BookDeletion`, independente da existência física dos arquivos.
+2. `BookDeletion.status` admite somente `pending` e `completed` no MVP.
+3. Ao iniciar a exclusão, o estado lógico passa imediatamente para `pending`: o livro e todas as suas versões ficam inacessíveis.
+4. A exclusão só passa para `completed` depois que todas as tarefas físicas aplicáveis terminarem com confirmação de remoção.
+5. Falhas de remoção não devem alterar `BookDeletion` para `completed`; cada falha deve ser mantida em uma `FileRemovalTask`.
+6. `FileRemovalTask` registra remoções físicas de arquivos locais de livros e capas locais. Seu estado é `pending`, `in_progress`, `failed` ou `completed`.
+7. A tarefa deve registrar motivo, referência local, quantidade de tentativas e informações mínimas da última tentativa. Reinicializações não podem destruir essas informações.
+8. Ao efetivar uma substituição ou exclusão, o estado lógico e o bloqueio de acesso devem ocorrer antes ou em coordenação persistida com o início das tarefas físicas.
+9. Quando a substituição estiver efetivada, a nova versão continua atual mesmo que a tarefa da versão anterior esteja pendente ou falhe.
+10. Quando a exclusão estiver iniciada, nenhuma nova tentativa ou reinicialização pode restaurar o acesso ao livro, às versões ou aos compartilhamentos.
+11. A remoção física deve ser idempotente. Reexecutar a tarefa para o mesmo arquivo não pode falhar por o arquivo já ter sido removido; esse resultado significa conclusão.
+12. Uma tarefa em `in_progress` ao reiniciar a aplicação deve ser considerada retomável. Não se pode inferir sucesso ou falha sem confirmação do armazenamento.
+13. Apenas `completed` autoriza limpar a referência local e registrar a confirmação em `deletedAt` no `BookFile` afetado.
+14. Falhas mantêm `storageKey` e `deletedAt` consistentes com uma remoção ainda não confirmada e permitem novas tentativas.
+15. O processo de recuperação deve operar dentro da aplicação ou de um componente da infraestrutura do monólito; o MVP não exige uma fila externa.
+16. Capas externas referenciadas por URL não são submetidas a remoção física e não devem ser alteradas no servidor externo.
+17. Metadados e registros históricos devem ser preservados após a remoção física do conteúdo binário.
+18. O histórico de metadados não permite recuperar ou servir o conteúdo removido pela aplicação.
+
+## 8. Idempotência e conclusão
+
+1. Repetir uma operação de exclusão já iniciada não cria outro processo ativo nem reativa o livro.
+2. Repetir a execução de uma tarefa concluída não deve criar outra remoção nem alterar metadados já concluídos.
+3. Reprocessar uma tarefa pendente ou falha não pode criar múltiplos estados contraditórios para o mesmo alvo.
+4. A exclusão de um livro é concluída somente após todas as tarefas aplicáveis serem `completed` e o `BookDeletion` correspondente ser marcado `completed`.
+5. A substituição é concluída logicamente quando a nova versão passa a atual e a versão anterior fica histórica e inacessível, independentemente do estado posterior da remoção física.
+6. A substituição não é desfeita por falha física nem reinicia permissões ou progresso já alterados.
+7. Toda conclusão depende de confirmação persistida e da confirmação do armazenamento, nunca de uma suposição baseada apenas no término da chamada.
+8. Recuperação após reinício, novas tentativas ou chamadas concorrentes devem preservar os mesmos efeitos finais e não podem restaurar o acesso.
+
+## 9. Resultado esperado
 
 Uma operação só é considerada concluída quando as validações forem aprovadas, os dados persistidos e as permissões respeitadas. Estados de recuperação pendente devem ser registrados explicitamente, sem serem tratados como conclusão física.
 
@@ -81,8 +113,7 @@ Na substituição, a efetivação da nova versão não depende da remoção fís
 
 Na exclusão de um livro, o início da exclusão lógica torna imediatamente o livro e todas as versões inacessíveis e revoga os compartilhamentos ativos. A exclusão só é concluída quando todos os arquivos físicos forem removidos com confirmação. Uma falha em qualquer remoção mantém a exclusão pendente, permite novas tentativas e não restaura o acesso. Após a confirmação de cada remoção, o registro histórico da versão é preservado, `storageKey` é limpo e `deletedAt` é preenchido.
 
-## 8. Decisões ainda pendentes
+## 10. Decisões ainda pendentes
 
 - Campos obrigatórios adicionais no cadastro, além de e-mail e senha.
 - Representação da posição de leitura específica para cada formato e solução de leitura.
-- Mecanismo operacional de recuperação e nova tentativa quando a remoção física de uma versão falha.
